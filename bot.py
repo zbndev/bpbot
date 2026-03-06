@@ -14,11 +14,15 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# Enable logging
+# Enable logging - only warnings and errors
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.WARNING
 )
 logger = logging.getLogger(__name__)
+
+# Suppress verbose logging from httpx and telegram libraries
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
 
 load_dotenv()
 MSK_TZ = pytz.timezone("Europe/Moscow")
