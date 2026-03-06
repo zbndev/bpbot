@@ -193,9 +193,23 @@ async def log_measurement(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def get_stats(update: Update, context: ContextTypes.DEFAULT_TYPE, days: int):
     chat_id = update.message.chat_id
-    now_msk = datetime.now(MSK_TZ)
-    start_date = (now_msk - timedelta(days=days - 1)).strftime("%Y-%m-%d 00:00")
 
+    # First, find the latest record for this user
+    cursor.execute(
+        "SELECT timestamp FROM records WHERE chat_id=? ORDER BY timestamp DESC LIMIT 1",
+        (chat_id,),
+    )
+    latest_record = cursor.fetchone()
+
+    if not latest_record:
+        await update.message.reply_text("У вас пока нет записей.")
+        return
+
+    # Calculate start date from the latest record
+    latest_date = datetime.strptime(latest_record[0], "%Y-%m-%d %H:%M")
+    start_date = (latest_date - timedelta(days=days - 1)).strftime("%Y-%m-%d 00:00")
+
+    # Get records from the calculated period
     cursor.execute(
         "SELECT timestamp, measurement FROM records WHERE chat_id=? AND timestamp >= ? ORDER BY timestamp ASC",
         (chat_id, start_date),
