@@ -383,6 +383,15 @@ async def export_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption="Ваша полная история мониторинга 📊"
     )
 
+async def post_init(application: Application):
+    """Инициализация БД и планирование задач при запуске бота"""
+    await init_db()
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute("SELECT chat_id FROM schedule") as cursor:
+            users = await cursor.fetchall()
+    for (chat_id,) in users:
+        await schedule_user_jobs(chat_id, application)
+
 if __name__ == "__main__":
     TOKEN = os.getenv("TG_TOKEN")
     application = Application.builder().token(TOKEN).post_init(post_init).build()
