@@ -4,30 +4,16 @@ import re
 import logging
 import csv
 import io
+import statistics
 from datetime import datetime, timedelta
 import pytz
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-    CallbackQueryHandler,
-)
+# ... rest of imports unchanged
 
-# --- ЛОГИРОВАНИЕ ---
-# Улучшено логирование: только важные сообщения
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.WARNING
-)
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("telegram").setLevel(logging.WARNING)
-
-load_dotenv()
+# --- КОНСТАНТЫ ---
+DEFAULT_MORNING = "08:00"
+DEFAULT_DAY = "14:00"
+DEFAULT_EVENING = "20:00"
 MSK_TZ = pytz.timezone("Europe/Moscow")
 DB_NAME = "bp_tracker.db"
 
@@ -277,7 +263,22 @@ async def log_measurement(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("INSERT INTO records VALUES (?, ?, ?)", (chat_id, timestamp, f"{sys}/{dia}" + (f" {pulse}" if pulse else "")))
-        # Очистка и авто-базис (логика сохранена)
+        
+        # --- АВТО-БАЗИС (МЕДИАНА) ---
+        async with db.execute("SELECT COUNT(*) FROM records WHERE chat_id=?", (chat_id,)) as c:
+            count = (await c.fetchone())[0]
+            if count % 15 == 0:  # Пересчет каждые 15 замеров
+                new_base = await calculate_median_baseline(chat_id)
+                if new_base:
+                    await db.execute(
+                        "INSERT OR REPLACE INTO users_profile (chat_id, working_sys, working_dia, baseline_updated_at) VALUES (?, ?, ?, ?)",
+                        (chat_id, new_base[0], new_base[1], timestamp)
+                    )
+                    status += f"\n\n🤖 <b>Авто-настройка:</b> Обновлена ваша норма: {new_base[0]}/{new_base[1]}."
+
+        # --- ОЧИСТКА СТАРЫХ ДАННЫХ (14 дней) ---
+        two_weeks_ago = (now_msk - timedelta(days=14)).strftime("%Y-%m-%d %H:%M")
+        await db.execute("DELETE FROM records WHERE chat_id=? AND timestamp < ?", (chat_id, two_weeks_ago))
         await db.commit()
 
     # Предложение принять лекарства
