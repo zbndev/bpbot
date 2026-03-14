@@ -4,7 +4,3 @@ services:
     container_name: bpbot
     environment:
       - TG_TOKEN=${TG_TOKEN}
-    volumes:
-      - bpbot_volume:/app
-volumes:
-  bpbot_volume:
