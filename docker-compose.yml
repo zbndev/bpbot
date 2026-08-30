@@ -4,6 +4,7 @@ services:
     container_name: bpbot
     environment:
       - TG_TOKEN=${TG_TOKEN}
+      - DB_PASSWORD=${DB_PASSWORD}
     volumes:
       - bpbot_db:/app/db
 volumes:

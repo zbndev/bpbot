@@ -5,6 +5,7 @@ import logging
 import csv
 import io
 import statistics
+import shutil
 from datetime import datetime, timedelta
 from functools import partial
 import pytz
@@ -435,6 +436,137 @@ async def med_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text("Введите название лекарства:")
 
 
+async def db_backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начать процесс резервного копирования БД."""
+    db_password = os.getenv("DB_PASSWORD")
+    if not db_password:
+        await update.effective_message.reply_text("❌ Функция резервного копирования не настроена.")
+        return
+    
+    context.user_data["waiting_for"] = "db_password"
+    await update.effective_message.reply_text("Введите пароль:")
+
+
+async def handle_db_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверка пароля для доступа к БД."""
+    password = update.message.text
+    db_password = os.getenv("DB_PASSWORD")
+    
+    if password == db_password:
+        context.user_data.pop("waiting_for", None)
+        context.user_data["db_authenticated"] = True
+        keyboard = [
+            [InlineKeyboardButton("📥 Скачать", callback_data="db_download")],
+            [InlineKeyboardButton("📤 Восстановить", callback_data="db_upload")],
+        ]
+        await update.effective_message.reply_text(
+            "✅ Доступ разрешён. Выберите действие:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        context.user_data.pop("waiting_for", None)
+        await update.effective_message.reply_text("❌ Неверный пароль.")
+
+
+async def handle_db_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отправить файл БД пользователю."""
+    query = update.callback_query
+    await query.answer()
+    
+    if not context.user_data.get("db_authenticated"):
+        await query.edit_message_text("❌ Сессия истекла. Используйте /db для повторной авторизации.")
+        return
+    
+    if not os.path.exists(DB_NAME):
+        await query.edit_message_text("❌ Файл базы данных не найден.")
+        return
+    
+    try:
+        with open(DB_NAME, "rb") as db_file:
+            await context.bot.send_document(
+                chat_id=update.effective_chat.id,
+                document=db_file,
+                filename="bp_tracker.db",
+                caption="📦 Файл базы данных"
+            )
+    except Exception as e:
+        logger.error(f"Error sending database file: {e}")
+        await query.edit_message_text("❌ Ошибка при отправке файла.")
+
+
+async def handle_db_upload_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Запросить файл БД от пользователя."""
+    query = update.callback_query
+    await query.answer()
+    
+    if not context.user_data.get("db_authenticated"):
+        await query.edit_message_text("❌ Сессия истекла. Используйте /db для повторной авторизации.")
+        return
+    
+    context.user_data["waiting_for_db_file"] = True
+    await query.edit_message_text("Отправьте файл БД:")
+
+
+async def handle_db_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработать загруженный файл БД."""
+    if not context.user_data.get("waiting_for_db_file"):
+        return
+    
+    context.user_data.pop("waiting_for_db_file", None)
+    context.user_data.pop("db_authenticated", None)
+    
+    document = update.message.document
+    if not document:
+        await update.effective_message.reply_text("❌ Файл не найден.")
+        return
+    
+    if document.file_name != "bp_tracker.db":
+        await update.effective_message.reply_text("❌ Неверное имя файла. Ожидается: bp_tracker.db")
+        return
+    
+    try:
+        # Скачиваем файл
+        new_file = await context.bot.get_file(document.file_id)
+        
+        # Создаём резервную копию текущей БД
+        backup_path = f"{DB_NAME}.backup"
+        if os.path.exists(DB_NAME):
+            shutil.copy2(DB_NAME, backup_path)
+        
+        # Скачиваем и сохраняем новый файл
+        await new_file.download_to_drive(DB_NAME)
+        
+        # Проверяем, что файл валидный SQLite
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute("SELECT 1 FROM sqlite_master LIMIT 1")
+        
+        # Удаляем резервную копию при успехе
+        if os.path.exists(backup_path):
+            os.remove(backup_path)
+        
+        await update.effective_message.reply_text("✅ База данных успешно восстановлена.")
+        
+        # Перепланируем задания для всех пользователей
+        async with aiosqlite.connect(DB_NAME) as db:
+            async with db.execute("SELECT chat_id FROM schedule") as cursor:
+                async for (chat_id,) in cursor:
+                    await schedule_user_jobs(chat_id, context)
+        
+    except aiosqlite.Error:
+        # Восстанавливаем резервную копию при ошибке
+        if os.path.exists(f"{DB_NAME}.backup"):
+            shutil.copy2(f"{DB_NAME}.backup", DB_NAME)
+            os.remove(f"{DB_NAME}.backup")
+        await update.effective_message.reply_text("❌ Загруженный файл не является валидной базой данных SQLite.")
+    except Exception as e:
+        logger.error(f"Error uploading database file: {e}")
+        # Восстанавливаем резервную копию при ошибке
+        if os.path.exists(f"{DB_NAME}.backup"):
+            shutil.copy2(f"{DB_NAME}.backup", DB_NAME)
+            os.remove(f"{DB_NAME}.backup")
+        await update.effective_message.reply_text(f"❌ Ошибка при восстановлении: {e}")
+
+
 async def med_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показать список лекарств пользователя."""
     chat_id = update.effective_chat.id
@@ -650,6 +782,13 @@ async def universal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
             await query.edit_message_text("✅ Файл отправлен.")
 
+        # --- Резервное копирование БД ---
+        elif data == "db_download":
+            await handle_db_download(update, context)
+
+        elif data == "db_upload":
+            await handle_db_upload_request(update, context)
+
     except Exception as e:
         logger.error(f"Ошибка в callback обработчике: {e}")
         await query.edit_message_text("❌ Произошла ошибка.")
@@ -664,6 +803,11 @@ async def log_measurement(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text.strip()
     wait_mode = context.user_data.get("waiting_for")
+
+    # --- Обработка ввода пароля для БД ---
+    if wait_mode == "db_password":
+        await handle_db_password(update, context)
+        return
 
     # --- Обработка ввода нормы давления ---
     if wait_mode == "baseline":
@@ -1055,6 +1199,7 @@ if __name__ == "__main__":
         ("med_list", med_list),
         ("delete_last", delete_last),
         ("export", export_data),
+        ("db", db_backup_command),
     ]
 
     for cmd_name, cmd_handler in commands:
@@ -1070,6 +1215,11 @@ if __name__ == "__main__":
     # Обработчик текстовых сообщений (кроме команд)
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, log_measurement)
+    )
+
+    # Обработчик документов (для загрузки БД)
+    application.add_handler(
+        MessageHandler(filters.Document.ALL, handle_db_file_upload)
     )
 
     application.run_polling()
